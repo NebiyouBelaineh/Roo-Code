@@ -677,8 +677,13 @@ export async function presentAssistantMessage(cline: Task) {
 				}
 			}
 
-			//Intent Gatekeeper Hook
-			// Verify that agent has declared a valid intent_id before allowing destructive operations
+			// -------------------------------------------------------------------------
+			// Tool execution path: (1) validate tool name/use, (2) check repetition limit,
+			// (3) Pre-Hook: Intent Gatekeeper — require valid active intent for destructive
+			//     tools; block with tool error if not. (4) Dispatch to tool handler.
+			// Full handshake: system prompt mandate → select_active_intent → context injected
+			// → gatekeeper allows destructive tools. See .orchestration/README.md.
+			// -------------------------------------------------------------------------
 			if (!block.partial) {
 				const gatekeeperHook = new IntentGatekeeperHook()
 				const hookResult = await gatekeeperHook.check({

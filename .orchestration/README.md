@@ -229,6 +229,35 @@ Tool.handle() → Tool.execute()
 - **Separation of Concerns:** Hook logic separate from tool execution
 - **Fail-Safe:** Errors block execution rather than allowing unsafe operations
 
+### End-to-end handshake wiring
+
+Traceability from system prompt to tool execution:
+
+1. **System prompt** (`src/core/prompts/system.ts`, `src/core/prompts/sections/intent-handshake.ts`)
+
+    - When `.orchestration/active_intents.yaml` exists, `getIntentHandshakeSection(cwd)` injects the **INTENT-DRIVEN PROTOCOL** mandate. The model is instructed to call `select_active_intent` before any destructive action.
+
+2. **Tool list** (`src/core/prompts/tools/native-tools/index.ts`)
+
+    - `select_active_intent` is registered as a native tool; the model can call it and receives its description (including the “Intent-Driven Architect” reinforcement).
+
+3. **Tool execution loop** (`src/core/assistant-message/presentAssistantMessage.ts`)
+
+    - For each tool block: validate tool → check repetition → **Intent Gatekeeper pre-hook** → dispatch by `block.name` to the tool handler. A comment block above the gatekeeper documents this path.
+
+4. **Gatekeeper** (`src/hooks/IntentGatekeeperHook.ts`), invoked from `presentAssistantMessage` before the tool `switch`
+
+    - For destructive tools, requires `task.activeIntentId` and validates that the ID exists in `.orchestration/active_intents.yaml`. If not, blocks and returns: _"You must cite a valid active Intent ID."_
+
+5. **select_active_intent tool** (`src/core/tools/SelectActiveIntentTool.ts`, native schema in `src/core/prompts/tools/native-tools/select_active_intent.ts`)
+    - Loads the intent from `active_intents.yaml`, sets `task.activeIntentId` and `task.activeIntent`, returns `<intent_context>`. After that, the gatekeeper allows destructive tools for that task.
+
+```
+User request → System prompt (mandate) → LLM
+    → select_active_intent(intent_id) → <intent_context>
+    → write/edit/execute… → Pre-Hook (gatekeeper) → allow/block → Tool.handle()
+```
+
 ## Future Enhancements
 
 ### Intent History Context Injection
