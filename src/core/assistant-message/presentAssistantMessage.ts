@@ -32,6 +32,7 @@ import { attemptCompletionTool, AttemptCompletionCallbacks } from "../tools/Atte
 import { newTaskTool } from "../tools/NewTaskTool"
 import { updateTodoListTool } from "../tools/UpdateTodoListTool"
 import { runSlashCommandTool } from "../tools/RunSlashCommandTool"
+import { selectActiveIntentTool } from "../tools/SelectActiveIntentTool"
 import { skillTool } from "../tools/SkillTool"
 import { generateImageTool } from "../tools/GenerateImageTool"
 import { applyDiffTool as applyDiffToolClass } from "../tools/ApplyDiffTool"
@@ -40,6 +41,7 @@ import { codebaseSearchTool } from "../tools/CodebaseSearchTool"
 
 import { formatResponse } from "../prompts/responses"
 import { sanitizeToolUseId } from "../../utils/tool-id"
+import { IntentGatekeeperHook } from "../../hooks"
 
 /**
  * Processes and presents assistant message content to the user interface.
@@ -675,6 +677,26 @@ export async function presentAssistantMessage(cline: Task) {
 				}
 			}
 
+			//Intent Gatekeeper Hook
+			// Verify that agent has declared a valid intent_id before allowing destructive operations
+			if (!block.partial) {
+				const gatekeeperHook = new IntentGatekeeperHook()
+				const hookResult = await gatekeeperHook.check({
+					task: cline,
+					toolName: block.name,
+					toolUse: block,
+				})
+
+				if (!hookResult.allow) {
+					cline.consecutiveMistakeCount++
+					cline.recordToolError(block.name)
+					cline.didToolFailInCurrentTurn = true
+					const errorMessage = hookResult.error || "You must cite a valid active Intent ID."
+					pushToolResult(IntentGatekeeperHook.formatError(errorMessage))
+					break
+				}
+			}
+
 			switch (block.name) {
 				case "write_to_file":
 					await checkpointSaveAndMark(cline)
@@ -770,6 +792,13 @@ export async function presentAssistantMessage(cline: Task) {
 					break
 				case "read_command_output":
 					await readCommandOutputTool.handle(cline, block as ToolUse<"read_command_output">, {
+						askApproval,
+						handleError,
+						pushToolResult,
+					})
+					break
+				case "select_active_intent":
+					await selectActiveIntentTool.handle(cline, block as ToolUse<"select_active_intent">, {
 						askApproval,
 						handleError,
 						pushToolResult,
