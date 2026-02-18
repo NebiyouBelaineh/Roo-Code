@@ -41,6 +41,7 @@ import { codebaseSearchTool } from "../tools/CodebaseSearchTool"
 
 import { formatResponse } from "../prompts/responses"
 import { sanitizeToolUseId } from "../../utils/tool-id"
+import { IntentGatekeeperHook } from "../../hooks"
 
 /**
  * Processes and presents assistant message content to the user interface.
@@ -672,6 +673,26 @@ export async function presentAssistantMessage(cline: Task) {
 							`Tool call repetition limit reached for ${block.name}. Please try a different approach.`,
 						),
 					)
+					break
+				}
+			}
+
+			//Intent Gatekeeper Hook
+			// Verify that agent has declared a valid intent_id before allowing destructive operations
+			if (!block.partial) {
+				const gatekeeperHook = new IntentGatekeeperHook()
+				const hookResult = await gatekeeperHook.check({
+					task: cline,
+					toolName: block.name,
+					toolUse: block,
+				})
+
+				if (!hookResult.allow) {
+					cline.consecutiveMistakeCount++
+					cline.recordToolError(block.name)
+					cline.didToolFailInCurrentTurn = true
+					const errorMessage = hookResult.error || "You must cite a valid active Intent ID."
+					pushToolResult(IntentGatekeeperHook.formatError(errorMessage))
 					break
 				}
 			}

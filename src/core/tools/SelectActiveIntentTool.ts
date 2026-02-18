@@ -74,7 +74,6 @@ export class SelectActiveIntentTool extends BaseTool<"select_active_intent"> {
 			;(task as any).activeIntent = intent
 
 			// Construct the intent context XML block
-			// According to Phase 1: "Construct an XML block <intent_context> containing *only* the constraints and scope for the selected ID"
 			const intentContext = this.buildIntentContext(intent)
 
 			// Return the context as the tool result
@@ -87,13 +86,12 @@ export class SelectActiveIntentTool extends BaseTool<"select_active_intent"> {
 
 	/**
 	 * Builds the intent context XML block containing constraints and scope.
-	 * According to Phase 1 requirements, this should contain *only* the constraints and scope.
 	 */
 	private buildIntentContext(intent: ActiveIntent): string {
 		const ownedScope = intent.owned_scope || []
 		const constraints = intent.constraints || []
 
-		// Build XML block with constraints and scope as specified in Phase 1
+		// Build XML block with constraints and scope
 		const scopeSection =
 			ownedScope.length > 0
 				? `<owned_scope>

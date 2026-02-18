@@ -8,7 +8,6 @@ After calling this tool, you will receive an <intent_context> block containing:
 - The intent's constraints and requirements
 - The owned_scope (files you're authorized to modify)
 - Related files and recent history
-- Acceptance criteria
 
 Only after receiving this context can you proceed with code changes.`
 
