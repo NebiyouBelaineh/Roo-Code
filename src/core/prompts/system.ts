@@ -23,6 +23,7 @@ import {
 	addCustomInstructions,
 	markdownFormattingSection,
 	getSkillsSection,
+	getIntentHandshakeSection,
 } from "./sections"
 
 // Helper function to get prompt component, filtering out empty objects
@@ -74,9 +75,10 @@ async function generatePrompt(
 	// Tool calling is native-only.
 	const effectiveProtocol = "native"
 
-	const [modesSection, skillsSection] = await Promise.all([
+	const [modesSection, skillsSection, intentHandshakeSection] = await Promise.all([
 		getModesSection(context),
 		getSkillsSection(skillsManager, mode as string),
+		getIntentHandshakeSection(cwd),
 	])
 
 	// Tools catalog is not included in the system prompt.
@@ -99,6 +101,7 @@ ${getRulesSection(cwd, settings)}
 ${getSystemInfoSection(cwd)}
 
 ${getObjectiveSection()}
+${intentHandshakeSection ? `\n${intentHandshakeSection}\n` : ""}
 
 ${await addCustomInstructions(baseInstructions, globalCustomInstructions || "", cwd, mode, {
 	language: language ?? formatLanguage(vscode.env.language),

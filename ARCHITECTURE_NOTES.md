@@ -1,9 +1,10 @@
-# Architecture Notes: Tool Loop & Prompt Builder
+# Architecture Notes: Tool Loop, Prompt Builder & Data Boundaries
 
-This document describes the architecture of two critical systems in Roo Code:
+This document describes the architecture of several critical systems in Roo Code:
 
 1. **The Tool Loop** - How tool calls are processed and executed
 2. **The Prompt Builder** - How system prompts are constructed
+3. **The Three-Layer Model & Data Boundaries** - How the Webview, Extension Host, and LLM backend interact; security, secrets, and XSS considerations
 
 ---
 
@@ -42,6 +43,8 @@ presentAssistantMessage() called (presentAssistantMessage.ts:61)
 Tool validation (validateToolUse)
     ↓
 Tool repetition check
+    ↓
+Pre-Hook: Intent Gatekeeper (IntentGatekeeperHook.check) — blocks destructive tools if no valid intent
     ↓
 Switch statement routes to specific tool handler
     ↓
@@ -125,7 +128,13 @@ const toolUse = NativeToolCallParser.parseToolCall({
     - Uses `toolRepetitionDetector` to prevent identical consecutive calls
     - Can prompt user or block execution based on configuration
 
-4. **Tool Routing** (lines 678-850):
+4. **Intent Gatekeeper (Pre-Hook)** (presentAssistantMessage.ts, before tool switch):
+
+    - For each complete tool block, `IntentGatekeeperHook.check()` runs before dispatch.
+    - Destructive tools (`write_to_file`, `edit`, `execute_command`, etc.) require a valid `task.activeIntentId` and that the ID exists in `.orchestration/active_intents.yaml`. Otherwise execution is blocked and a tool error is returned: _"You must cite a valid active Intent ID."_
+    - Read-only and exempt tools (including `select_active_intent`) are not gated. See `src/hooks/IntentGatekeeperHook.ts` and `.orchestration/README.md` for the full handshake wiring.
+
+5. **Tool Routing** (lines 678-850):
     - Large switch statement routes to specific tool handlers
     - Each case calls `tool.handle()` with callbacks
     - Destructive operations trigger checkpointing first
@@ -324,6 +333,7 @@ generatePrompt() assembles sections (system.ts:41)
     ├─→ getRulesSection()
     ├─→ getSystemInfoSection()
     ├─→ getObjectiveSection()
+    ├─→ getIntentHandshakeSection(cwd) (when .orchestration/active_intents.yaml exists)
     └─→ addCustomInstructions()
     ↓
 Complete system prompt string returned
@@ -452,7 +462,12 @@ ${await addCustomInstructions(baseInstructions, globalCustomInstructions || "", 
     - Available skills from SkillsManager
 
 10. **`markdownFormattingSection()`** (`markdown-formatting.ts`)
+
     - Formatting guidelines for markdown
+
+11. **`getIntentHandshakeSection()`** (`intent-handshake.ts`)
+
+    - When `.orchestration/active_intents.yaml` exists, injects the **INTENT-DRIVEN PROTOCOL** mandate: the model must call `select_active_intent` before any destructive tool use. Ensures the reasoning loop (handshake) is an explicit contract in the system prompt. See `.orchestration/README.md` for end-to-end handshake wiring.
 
 #### 2.3 Task Integration (`Task.ts`)
 
@@ -534,15 +549,128 @@ The prompt includes dynamic content based on:
 
 ---
 
-## 3. Integration Points
+## 3. Three-Layer Model & Data Boundaries
+
+### Overview
+
+VS Code extensions that provide rich UI (like Roo Code) follow a **three-layer architecture**:
+
+1. **Webview (UI layer)** – Renders the UI in an isolated browser-like context; no direct access to the file system, secrets, or Node.js APIs.
+2. **Extension Host (logic layer)** – Runs in a Node.js process; has access to the VS Code API, file system, and credentials; orchestrates tasks and talks to external services.
+3. **External services (e.g. LLM backend)** – API providers (OpenAI, Anthropic, OpenRouter, etc.); contacted only from the Extension Host over HTTPS.
+
+Understanding these boundaries is essential for security, correct message flow, and where to implement features (e.g. hooks, prompt building, tool execution).
+
+### How VS Code Extensions Work: The Three Layers
+
+| Layer              | Process / context                   | Runs                                              | Has access to                                                                               |
+| ------------------ | ----------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **Webview**        | Separate renderer (browser context) | React app in `webview-ui/`                        | `acquireVsCodeApi()` → `postMessage` / `getState` / `setState` only; no Node, no fs, no env |
+| **Extension Host** | Main extension process (Node.js)    | `src/` (ClineProvider, Task, tools, API handlers) | Full VS Code API, `vscode.ExtensionContext`, secrets store, file system, network            |
+| **LLM backend**    | Remote servers                      | N/A                                               | Receives HTTPS requests from Extension Host with API keys in headers                        |
+
+The **only** sanctioned bridge between Webview and Extension Host is the **message channel**:
+
+- **Webview → Extension Host:** The webview calls `acquireVsCodeApi().postMessage(message)`. VS Code delivers it to the extension via `webview.onDidReceiveMessage(listener)`.
+- **Extension Host → Webview:** The extension calls `webview.postMessage(message)`. VS Code delivers it to the webview as a `MessageEvent`; the webview listens with `window.addEventListener("message", handler)` (or equivalent).
+
+No shared memory, no direct function calls. All cross-boundary data must be **JSON-serializable**.
+
+### Data Boundaries in Roo Code
+
+#### Boundary 1: Webview ↔ Extension Host
+
+**Message types (from `@roo-code/types`):**
+
+- **`WebviewMessage`** – Sent **from** the webview **to** the extension. Examples: `newTask`, `askResponse`, `saveApiConfiguration`, `getListApiConfiguration`, `sendMessage`-style invokes, `searchFiles`, `condenseTaskContextRequest`, etc. Handled by `webviewMessageHandler()` in the Extension Host.
+- **`ExtensionMessage`** – Sent **from** the extension **to** the webview. Examples: `state`, `action`, `invoke`, `messageUpdated`, `taskHistoryUpdated`, `selectedImages`, `theme`, `mcpServers`, etc. The webview receives these in `App.tsx` / `ChatView.tsx` via `useEvent("message", onMessage)` and similar.
+
+**Key locations:**
+
+- **Extension Host → Webview:** `ClineProvider.postMessageToWebview(message: ExtensionMessage)` (line ~1127) → `this.view?.webview.postMessage(message)`. Used to push state updates, actions, and UI directives.
+- **Webview → Extension Host:** In the webview, `vscode.postMessage(msg)` (see `webview-ui/src/utils/vscode.ts`, which wraps `acquireVsCodeApi().postMessage`). In the extension, `ClineProvider.setWebviewMessageListener()` (line ~1322) registers `webview.onDidReceiveMessage(onReceiveMessage)`; the handler delegates to `webviewMessageHandler(provider, message, marketplaceManager)` in `src/core/webview/webviewMessageHandler.ts`.
+
+**Flow summary:**
+
+```
+Webview (React)                    Extension Host (Node)
+─────────────────                  ─────────────────────
+vscode.postMessage(WebviewMessage)  →  webview.onDidReceiveMessage
+                                        → webviewMessageHandler(provider, message)
+                                           → Task creation, API config, tools, etc.
+
+view.webview.postMessage(ExtensionMessage)  ←  ClineProvider.postMessageToWebview(msg)
+                                    ←  window "message" event
+                                       → React state updates, actions, invokes
+```
+
+The webview **never** receives API keys, file contents, or raw system prompts unless the extension explicitly includes them in an `ExtensionMessage`. The extension decides what to send (e.g. partial state, task history without secrets).
+
+#### Boundary 2: Extension Host ↔ LLM Backend
+
+All LLM communication happens **only** in the Extension Host:
+
+- **Entry:** `Task` drives the loop; it obtains the system prompt via `getSystemPrompt()` and calls `this.api.createMessage(systemPrompt, conversationHistory, metadata)` (see Tool Loop and Prompt Builder sections).
+- **API layer:** `src/api/` – `buildApiHandler()` returns an `ApiHandler` (e.g. OpenAI, Anthropic, OpenRouter, LiteLLM). Each provider uses its own HTTP client/SDK and **holds API keys** from `ProviderSettings` (stored in the extension’s secret storage or config, not in the webview).
+- **Outgoing:** HTTPS requests to provider endpoints (e.g. `api.openai.com`, `api.anthropic.com`, OpenRouter, LM Studio local). Request bodies include system prompt, messages, and tool definitions; headers include `Authorization: Bearer <key>` or equivalent.
+- **Incoming:** Streaming or non-streaming responses; tool calls are parsed in the Extension Host by `NativeToolCallParser` and then processed by `presentAssistantMessage()` and the tool loop.
+
+The webview **never** talks to the LLM directly. It only sends user intent (e.g. “new task”, “send message”) via `WebviewMessage`; the Extension Host builds the prompt, calls the API, and streams back results via `ExtensionMessage` (e.g. state updates, message deltas).
+
+### Why the Three-Layer Model Matters
+
+#### Security and isolation
+
+- **Webview is untrusted.** It renders HTML/JS that can be influenced by content (e.g. chat messages, markdown). Treat it as a display and input surface, not as a place to make security decisions or hold secrets.
+- **Extension Host is trusted.** Only the extension code runs here; it has access to secrets and sensitive APIs. All decisions about “is this request allowed?” and “what do we send to the API?” belong here.
+- **LLM backend is external.** The extension authenticates via keys; the backend is outside VS Code’s process model. The three-layer split keeps keys and sensitive logic out of the webview and centralizes them in the Extension Host.
+
+#### Protection of secrets
+
+- **API keys, OAuth tokens, and passwords** are stored in the Extension Host (e.g. `context.secrets`, provider config). They are never sent to the webview as part of normal state; only non-secret metadata (e.g. config names, model lists) is.
+- **State pushed to the webview** (`ExtensionMessage` with `state` or similar) is designed to exclude secrets. If new state fields are added, they must be vetted so that credentials and other sensitive data are not serialized into the webview.
+- **User input from the webview** (e.g. pasted API key in settings) is sent as a `WebviewMessage`; the Extension Host writes it to secret storage and does not echo it back in full in subsequent state updates.
+
+#### XSS and content injection
+
+- **Risk:** The webview is a browser context. If the extension sent raw HTML or unsanitized LLM output into the webview and rendered it with `dangerouslySetInnerHTML` or equivalent, an attacker could inject scripts (XSS) or abuse injected content.
+- **Mitigations in place:**
+    - **Structured messages:** Data to the webview is sent as typed `ExtensionMessage` payloads (e.g. state, message content), not as raw HTML. The React UI renders text/markdown in a controlled way.
+    - **Content Security Policy (CSP):** The webview HTML is generated in the Extension Host with a strict CSP meta tag (see `ClineProvider.getHtmlContent()` and `getHMRHtmlContent()`). Scripts are allowed only via a **nonce** (`getNonce()` in `src/core/webview/getNonce.ts`); inline scripts without the nonce are blocked. This limits XSS to nonce-guessing (practically infeasible when the nonce is random per load).
+    - **CSP in production:** e.g. `script-src ${webview.cspSource} 'wasm-unsafe-eval' 'nonce-${nonce}' ...; connect-src ...` so that only expected origins and nonce-bearing scripts run.
+- **Best practice:** When adding new UI that displays LLM or user-generated content, keep rendering in the webview structured (e.g. markdown with a safe renderer) and avoid injecting HTML from untrusted strings. Keep secrets and sensitive logic in the Extension Host.
+
+#### Summary table
+
+| Concern                       | Webview                   | Extension Host               | LLM backend                    |
+| ----------------------------- | ------------------------- | ---------------------------- | ------------------------------ |
+| Holds API keys / secrets      | No                        | Yes (secret storage, config) | Receives keys in requests only |
+| Makes LLM API calls           | No                        | Yes                          | Serves requests                |
+| Renders user/LLM content      | Yes (must sanitize / CSP) | N/A                          | N/A                            |
+| Parses tool calls             | No                        | Yes                          | Sends tool_use in stream       |
+| File system / terminal access | No                        | Yes (via tools)              | No                             |
+
+### File Reference: Data Boundaries
+
+- **Webview entry (message out):** `webview-ui/src/utils/vscode.ts` – `VSCodeAPIWrapper.postMessage(WebviewMessage)`
+- **Webview listeners (message in):** `webview-ui/src/App.tsx`, `webview-ui/src/components/chat/ChatView.tsx` – `useEvent("message", …)` / `handleMessage`
+- **Extension Host listener:** `src/core/webview/ClineProvider.ts` – `setWebviewMessageListener()` → `webview.onDidReceiveMessage` → `webviewMessageHandler`
+- **Extension Host sender:** `src/core/webview/ClineProvider.ts` – `postMessageToWebview(ExtensionMessage)` → `view.webview.postMessage(message)`
+- **Message types:** `packages/types/src/vscode-extension-host.ts` – `WebviewMessage`, `ExtensionMessage`
+- **LLM API (Extension Host only):** `src/api/` (e.g. `buildApiHandler`, provider-specific handlers), `src/core/task/Task.ts` – `getSystemPrompt()`, `api.createMessage()`
+- **CSP / nonce:** `src/core/webview/ClineProvider.ts` – `getHtmlContent()`, `getHMRHtmlContent()`; `src/core/webview/getNonce.ts`
+
+---
+
+## 4. Integration Points
 
 ### How Tool Loop and Prompt Builder Work Together
 
-1. **Prompt Builder** creates system prompt that instructs LLM on available tools
-2. **LLM** generates tool calls based on prompt instructions
-3. **Tool Loop** processes and executes those tool calls
-4. **Results** feed back into conversation history
-5. **Next API call** uses updated prompt (if mode/rules changed)
+1. **Prompt Builder** creates system prompt that instructs LLM on available tools. When `.orchestration/active_intents.yaml` exists, it also injects the **Intent-Driven Protocol** mandate (`getIntentHandshakeSection`), requiring the model to call `select_active_intent` before destructive actions.
+2. **LLM** generates tool calls based on prompt instructions (e.g. `select_active_intent` first, then write/edit tools).
+3. **Tool Loop** processes tool calls; the **Intent Gatekeeper** pre-hook in `presentAssistantMessage` blocks destructive tools until a valid intent is selected.
+4. **Results** feed back into conversation history.
+5. **Next API call** uses updated prompt (if mode/rules changed). See `.orchestration/README.md` for full end-to-end handshake wiring.
 
 ### Hook Injection Points
 
@@ -570,11 +698,13 @@ For implementing the hook engine (Phase 1+), key interception points:
 
 ---
 
-## 4. File Reference Summary
+## 5. File Reference Summary
 
 ### Tool Loop Files
 
-- `src/core/assistant-message/presentAssistantMessage.ts` - Main router
+- `src/core/assistant-message/presentAssistantMessage.ts` - Main router (includes Intent Gatekeeper pre-hook)
+- `src/hooks/IntentGatekeeperHook.ts` - Pre-hook: enforces valid intent for destructive tools
+- `src/hooks/types.ts` - Hook context and result types
 - `src/core/tools/BaseTool.ts` - Base infrastructure
 - `src/core/tools/WriteToFileTool.ts` - File writing tool
 - `src/core/tools/ExecuteCommandTool.ts` - Command execution tool
@@ -584,12 +714,12 @@ For implementing the hook engine (Phase 1+), key interception points:
 ### Prompt Builder Files
 
 - `src/core/prompts/system.ts` - Main prompt builder
-- `src/core/prompts/sections/*.ts` - Prompt sections
+- `src/core/prompts/sections/*.ts` - Prompt sections (including `intent-handshake.ts` for the Intent-Driven Protocol mandate)
 - `src/core/task/Task.ts` - Task class (contains `getSystemPrompt()`)
 
 ---
 
-## 5. Key Takeaways
+## 6. Key Takeaways
 
 ### Tool Loop
 
