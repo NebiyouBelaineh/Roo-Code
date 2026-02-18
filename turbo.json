@@ -12,7 +12,8 @@
 		},
 		"build": {
 			"outputs": ["dist/**"],
-			"inputs": ["src/**", "package.json", "tsconfig.json", "tsup.config.ts", "vite.config.ts"]
+			"inputs": ["src/**", "package.json", "tsconfig.json", "tsup.config.ts", "vite.config.ts"],
+			"dependsOn": ["^build"]
 		},
 		"watch:tsc": {
 			"cache": false
