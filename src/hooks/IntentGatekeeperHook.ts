@@ -132,6 +132,19 @@ export class IntentGatekeeperHook {
 			)
 		}
 
+		// For write_to_file, require tool call's intent_id to match the selected active intent (Phase 3).
+		if (toolName === "write_to_file") {
+			const callIntentId = (context.toolUse as { nativeArgs?: { intent_id?: string } }).nativeArgs?.intent_id
+			if (callIntentId !== undefined && callIntentId !== activeIntentId) {
+				return this.denied(
+					`write_to_file intent_id (${callIntentId}) does not match selected active intent (${activeIntentId}). Call select_active_intent first or use the same intent_id.`,
+					classification,
+					"HOOK_BLOCKED",
+					"select_active_intent",
+				)
+			}
+		}
+
 		// Enforce .intentignore path exclusions and owned_scope for all path-based destructive tools.
 		const targetPaths = this.getTargetPathsForTool(toolName, toolUse)
 		if (targetPaths.length > 0) {

@@ -15,12 +15,16 @@ import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { convertNewFileToUnifiedDiff, computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
+import { isMutationClass } from "../../shared/tools"
+import { runAgentTracePostHook } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
 interface WriteToFileParams {
 	path: string
 	content: string
+	intent_id: string
+	mutation_class: string
 }
 
 export class WriteToFileTool extends BaseTool<"write_to_file"> {
@@ -43,6 +47,35 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 			task.consecutiveMistakeCount++
 			task.recordToolError("write_to_file")
 			pushToolResult(await task.sayAndCreateMissingParamError("write_to_file", "content"))
+			await task.diffViewProvider.reset()
+			return
+		}
+
+		const intentId = params.intent_id
+		if (!intentId || typeof intentId !== "string" || intentId.trim() === "") {
+			task.consecutiveMistakeCount++
+			task.recordToolError("write_to_file")
+			pushToolResult(await task.sayAndCreateMissingParamError("write_to_file", "intent_id"))
+			await task.diffViewProvider.reset()
+			return
+		}
+
+		const mutationClass = params.mutation_class
+		if (!mutationClass || typeof mutationClass !== "string") {
+			task.consecutiveMistakeCount++
+			task.recordToolError("write_to_file")
+			pushToolResult(await task.sayAndCreateMissingParamError("write_to_file", "mutation_class"))
+			await task.diffViewProvider.reset()
+			return
+		}
+		if (!isMutationClass(mutationClass)) {
+			task.consecutiveMistakeCount++
+			task.recordToolError("write_to_file")
+			pushToolResult(
+				formatResponse.toolError(
+					"mutation_class must be AST_REFACTOR or INTENT_EVOLUTION. AST_REFACTOR = refactor/rename/move without changing behavior; INTENT_EVOLUTION = new feature or requirement change.",
+				),
+			)
 			await task.diffViewProvider.reset()
 			return
 		}
@@ -178,6 +211,17 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 			const message = await task.diffViewProvider.pushToolWriteResult(task, task.cwd, !fileExists)
 
 			pushToolResult(message)
+
+			// Phase 3: append Agent Trace entry after successful write (post-hook).
+			try {
+				await runAgentTracePostHook(task, {
+					path: relPath,
+					content: newContent,
+					intent_id: intentId,
+				})
+			} catch (err) {
+				console.error("[WriteToFileTool] Agent trace post-hook failed:", err)
+			}
 
 			await task.diffViewProvider.reset()
 			this.resetPartialState()

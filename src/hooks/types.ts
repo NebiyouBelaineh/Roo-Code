@@ -54,3 +54,39 @@ export interface HookContext {
 	 */
 	askForAuthorization?: (message: string) => Promise<boolean>
 }
+
+/** Phase 3: Agent Trace schema for .orchestration/agent_trace.jsonl (append-only ledger). */
+export interface AgentTraceContributor {
+	entity_type: "AI"
+	model_identifier: string
+}
+
+export interface AgentTraceRange {
+	start_line: number
+	end_line: number
+	content_hash: string
+}
+
+export interface AgentTraceRelated {
+	type: "specification"
+	value: string
+}
+
+export interface AgentTraceConversation {
+	url: string
+	contributor: AgentTraceContributor
+	ranges: AgentTraceRange[]
+	related: AgentTraceRelated[]
+}
+
+export interface AgentTraceFile {
+	relative_path: string
+	conversations: AgentTraceConversation[]
+}
+
+export interface AgentTraceEntry {
+	id: string
+	timestamp: string
+	vcs: { revision_id: string | null }
+	files: AgentTraceFile[]
+}
