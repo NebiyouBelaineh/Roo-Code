@@ -10,4 +10,5 @@
 
 export { IntentGatekeeperHook } from "./IntentGatekeeperHook"
 export { runAgentTracePostHook } from "./AgentTracePostHook"
+export { runIntentMapPostHook } from "./IntentMapPostHook"
 export type { HookResult, AgentTraceEntry } from "./types"

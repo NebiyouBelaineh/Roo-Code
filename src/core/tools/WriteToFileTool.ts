@@ -16,7 +16,7 @@ import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { convertNewFileToUnifiedDiff, computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
 import { isMutationClass } from "../../shared/tools"
-import { runAgentTracePostHook } from "../../hooks"
+import { runAgentTracePostHook, runIntentMapPostHook } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -221,6 +221,15 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 				})
 			} catch (err) {
 				console.error("[WriteToFileTool] Agent trace post-hook failed:", err)
+			}
+
+			// Update intent_map.md when INTENT_EVOLUTION (Phase 3 spatial map).
+			if (mutationClass === "INTENT_EVOLUTION") {
+				try {
+					await runIntentMapPostHook(task, { intent_id: intentId, path: relPath })
+				} catch (err) {
+					console.error("[WriteToFileTool] Intent map post-hook failed:", err)
+				}
 			}
 
 			await task.diffViewProvider.reset()
