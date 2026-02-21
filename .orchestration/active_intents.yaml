@@ -2,47 +2,40 @@
 # This file tracks the lifecycle of business requirements and formalized intents.
 # Updated via Pre-Hooks (when an agent picks a task) and Post-Hooks (when a task is complete).
 
+# Demo intents for Phase 2 guardrails validation
+
 active_intents:
-  - id: "INT-001"
-    name: "JWT Authentication Migration"
+  - id: "INT-CI"
+    name: "CI Pipeline Refactor"
     status: "IN_PROGRESS"
-    # Formal Scope Definition (Crucial for Parallelism)
     owned_scope:
-      - "src/auth/**"
-      - "src/middleware/jwt.ts"
+      - ".github/**"
+      - "Dockerfile"
     constraints:
-      - "Must not use external auth providers"
-      - "Must maintain backward compatibility with Basic Auth"
-    # The "Definition of Done"
+      - "Only CI pipeline and container setup can be changed"
+      - "Do not edit test source files during this intent"
     acceptance_criteria:
-      - "Unit tests in tests/auth/ pass"
-      - "All existing endpoints continue to work"
-      - "Documentation updated"
+      - "Workflow and Docker updates complete successfully"
+      - "Out-of-scope writes are blocked by hook"
 
-  # Example: Completed intent
-  - id: "INT-002"
-    name: "Add User Profile API"
-    status: "COMPLETED"
-    owned_scope:
-      - "src/api/users/**"
-      - "src/models/user.ts"
-    constraints:
-      - "Follow RESTful conventions"
-      - "Include input validation"
-    acceptance_criteria:
-      - "API endpoints tested"
-      - "Swagger documentation complete"
-
-  # Example: Pending intent
-  - id: "INT-003"
-    name: "Refactor Database Layer"
+  - id: "INT-DOCS"
+    name: "Docs Cleanup"
     status: "PENDING"
     owned_scope:
-      - "src/db/**"
-      - "src/models/**"
+      - "docs/**"
     constraints:
-      - "Maintain existing API contracts"
-      - "Improve query performance"
+      - "Only documentation files can be changed"
     acceptance_criteria:
-      - "All tests pass"
-      - "Performance benchmarks met"
+      - "Docs updates stay within docs scope"
+
+  - id: "INT-BLOCKED"
+    name: "Blocked Intent For Policy Test"
+    status: "PENDING"
+    owned_scope:
+      - ".github/**"
+      - "Dockerfile"
+      - "docs/**"
+    constraints:
+      - "Used only to validate .intentignore behavior"
+    acceptance_criteria:
+      - "Intent-level ignore rule is enforced"
