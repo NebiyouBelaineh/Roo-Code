@@ -28,6 +28,18 @@ active_intents:
     acceptance_criteria:
       - "Docs updates stay within docs scope"
 
+  - id: "INT-WEATHER"
+    name: "Build Weather API"
+    status: "IN_PROGRESS"
+    owned_scope:
+      - "src/**"
+    constraints:
+      - "Weather-related API and types only under src/"
+      - "No external API keys in code; use placeholders or env"
+    acceptance_criteria:
+      - "Weather API module exports at least one function"
+      - "Unit tests in src/ or tests/ for weather logic pass"
+
   - id: "INT-BLOCKED"
     name: "Blocked Intent For Policy Test"
     status: "PENDING"
