@@ -12,6 +12,7 @@ import { fileExistsAtPath } from "../../utils/fs"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { sanitizeUnifiedDiff, computeDiffStats } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
+import { appendLessonLearned } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -206,12 +207,19 @@ export class SearchReplaceTool extends BaseTool<"search_replace"> {
 			}
 
 			// Save the changes
+			let saveResult: { newProblemsMessage?: string } = {}
 			if (isPreventFocusDisruptionEnabled) {
 				// Direct file write without diff view or opening the file
-				await task.diffViewProvider.saveDirectly(relPath, newContent, false, diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveDirectly(
+					relPath,
+					newContent,
+					false,
+					diagnosticsEnabled,
+					writeDelayMs,
+				)
 			} else {
 				// Call saveChanges to update the DiffViewProvider properties
-				await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
 			}
 
 			// Track file edit operation
@@ -224,6 +232,15 @@ export class SearchReplaceTool extends BaseTool<"search_replace"> {
 			// Get the formatted response message
 			const message = await task.diffViewProvider.pushToolWriteResult(task, task.cwd, false)
 			pushToolResult(message)
+
+			// Phase 4: record lesson when linter reports new problems after save.
+			if (saveResult.newProblemsMessage?.trim()) {
+				try {
+					await appendLessonLearned(task.cwd, relPath, saveResult.newProblemsMessage)
+				} catch (err) {
+					console.error("[SearchReplaceTool] Lesson recording failed:", err)
+				}
+			}
 
 			// Record successful tool usage and cleanup
 			task.recordToolUsage("search_replace")

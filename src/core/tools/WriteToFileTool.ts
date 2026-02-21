@@ -16,7 +16,7 @@ import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { convertNewFileToUnifiedDiff, computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
 import { isMutationClass } from "../../shared/tools"
-import { runAgentTracePostHook, runIntentMapPostHook } from "../../hooks"
+import { runAgentTracePostHook, runIntentMapPostHook, appendLessonLearned } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -141,6 +141,7 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 				EXPERIMENT_IDS.PREVENT_FOCUS_DISRUPTION,
 			)
 
+			let saveResult: { newProblemsMessage?: string } = {}
 			if (isPreventFocusDisruptionEnabled) {
 				task.diffViewProvider.editType = fileExists ? "modify" : "create"
 				if (fileExists) {
@@ -166,7 +167,13 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 					return
 				}
 
-				await task.diffViewProvider.saveDirectly(relPath, newContent, false, diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveDirectly(
+					relPath,
+					newContent,
+					false,
+					diagnosticsEnabled,
+					writeDelayMs,
+				)
 			} else {
 				if (!task.diffViewProvider.isEditing) {
 					const partialMessage = JSON.stringify(sharedMessageProps)
@@ -199,7 +206,7 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 					return
 				}
 
-				await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
 			}
 
 			if (relPath) {
@@ -229,6 +236,15 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 					await runIntentMapPostHook(task, { intent_id: intentId, path: relPath })
 				} catch (err) {
 					console.error("[WriteToFileTool] Intent map post-hook failed:", err)
+				}
+			}
+
+			// Phase 4: record lesson when linter reports new problems after save.
+			if (saveResult.newProblemsMessage?.trim()) {
+				try {
+					await appendLessonLearned(task.cwd, relPath, saveResult.newProblemsMessage)
+				} catch (err) {
+					console.error("[WriteToFileTool] Lesson recording failed:", err)
 				}
 			}
 
