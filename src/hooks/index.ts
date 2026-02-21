@@ -9,4 +9,5 @@
  */
 
 export { IntentGatekeeperHook } from "./IntentGatekeeperHook"
-export type { HookResult } from "./types"
+export { runAgentTracePostHook } from "./AgentTracePostHook"
+export type { HookResult, AgentTraceEntry } from "./types"
