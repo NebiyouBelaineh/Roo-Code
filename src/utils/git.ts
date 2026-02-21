@@ -201,6 +201,24 @@ async function checkGitRepo(cwd: string): Promise<boolean> {
 }
 
 /**
+ * Returns the current git revision (HEAD SHA) for the given directory.
+ * Used by Phase 3 agent trace for vcs.revision_id.
+ * @param cwd - Workspace root path
+ * @returns Full SHA string or null if not a git repo or on error
+ */
+export async function getCurrentRevision(cwd: string): Promise<string | null> {
+	try {
+		const isRepo = await checkGitRepo(cwd)
+		if (!isRepo) return null
+		const { stdout } = await execAsync("git rev-parse HEAD", { cwd })
+		const sha = stdout?.trim()
+		return sha && sha.length > 0 ? sha : null
+	} catch {
+		return null
+	}
+}
+
+/**
  * Checks if Git is installed on the system by attempting to run git --version
  * @returns {Promise<boolean>} True if Git is installed and accessible, false otherwise
  * @example
