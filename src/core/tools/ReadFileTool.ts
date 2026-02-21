@@ -24,6 +24,7 @@ import { extractTextFromFile, addLineNumbers, getSupportedBinaryFormats } from "
 import { readWithIndentation, readWithSlice } from "../../integrations/misc/indentation-reader"
 import { DEFAULT_LINE_LIMIT } from "../prompts/tools/native-tools/read_file"
 import type { ToolUse, PushToolResult } from "../../shared/tools"
+import { contentHashSha256 } from "../../utils/contentHash"
 
 import {
 	DEFAULT_MAX_IMAGE_FILE_SIZE_MB,
@@ -217,11 +218,13 @@ export class ReadFileTool extends BaseTool<"read_file"> {
 					const buffer = await fs.readFile(fullPath)
 					const fileContent = buffer.toString("utf-8")
 					const result = this.processTextFile(fileContent, entry)
+					// Phase 4: include content hash so agent can send expected_content_hash on write (optimistic locking)
+					const contentHash = contentHashSha256(fileContent)
 
 					await task.fileContextTracker.trackFileContext(relPath, "read_tool" as RecordSource)
 
 					updateFileResult(relPath, {
-						nativeContent: `File: ${relPath}\n${result}`,
+						nativeContent: `File: ${relPath}\n${result}\n\n[content_hash: ${contentHash}]`,
 					})
 				} catch (error) {
 					const errorMsg = error instanceof Error ? error.message : String(error)

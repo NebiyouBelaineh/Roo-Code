@@ -5,6 +5,8 @@ import * as yaml from "yaml"
 
 import type { ToolName } from "@roo-code/types"
 import type { ToolUse } from "../shared/tools"
+import { contentHashSha256 } from "../utils/contentHash"
+import { fileExistsAtPath } from "../utils/fs"
 import type { HookContext, HookErrorType, HookResult, ToolClassification } from "./types"
 
 /**
@@ -181,6 +183,13 @@ export class IntentGatekeeperHook {
 			}
 		}
 
+		// Phase 4: Concurrency control — optimistic locking. If agent sent expected_content_hash
+		// and the file on disk has a different hash, block the write (parallel edit).
+		const staleCheck = await this.checkStaleFile(context)
+		if (!staleCheck.allow) {
+			return staleCheck
+		}
+
 		return { allow: true, classification }
 	}
 
@@ -270,6 +279,59 @@ export class IntentGatekeeperHook {
 	}
 
 	private static readonly PATCH_FILE_MARKERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: "] as const
+
+	/** Tools that support optional expected_content_hash for Phase 4 optimistic locking. */
+	private static readonly TOOLS_WITH_CONTENT_HASH_CHECK: Set<ToolName> = new Set([
+		"write_to_file",
+		"apply_diff",
+		"edit_file",
+		"edit",
+		"search_replace",
+	])
+
+	/**
+	 * Phase 4: If the agent sent expected_content_hash and the file on disk has a different hash,
+	 * block the write (stale file — parallel agent or user edited it).
+	 */
+	private async checkStaleFile(context: HookContext): Promise<HookResult> {
+		const { task, toolName, toolUse } = context
+		if (!IntentGatekeeperHook.TOOLS_WITH_CONTENT_HASH_CHECK.has(toolName)) {
+			return { allow: true }
+		}
+		const targetPaths = this.getTargetPathsForTool(toolName, toolUse)
+		if (targetPaths.length === 0) {
+			return { allow: true }
+		}
+		const nativeArgs = toolUse.nativeArgs as Record<string, unknown> | undefined
+		const expectedHash = nativeArgs?.expected_content_hash
+		if (typeof expectedHash !== "string" || expectedHash.trim() === "") {
+			return { allow: true }
+		}
+		const normalizedExpected = expectedHash.trim()
+		for (const targetPath of targetPaths) {
+			const absolutePath = path.resolve(task.cwd, targetPath)
+			const exists = await fileExistsAtPath(absolutePath)
+			if (!exists) {
+				continue
+			}
+			try {
+				const content = await fs.readFile(absolutePath, "utf-8")
+				const currentHash = contentHashSha256(content)
+				if (currentHash !== normalizedExpected) {
+					return this.denied(
+						`Stale File: ${targetPath} was modified since you read it. Re-read the file with read_file and try again.`,
+						"destructive",
+						"STALE_FILE",
+						"read_file",
+					)
+				}
+			} catch {
+				// If we can't read the file, allow the tool to run (it may fail with its own error)
+				continue
+			}
+		}
+		return { allow: true }
+	}
 
 	/**
 	 * Returns all target file paths for a destructive tool (for scope and .intentignore checks).

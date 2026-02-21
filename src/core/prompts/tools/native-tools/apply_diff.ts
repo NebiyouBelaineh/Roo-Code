@@ -11,6 +11,8 @@ const DIFF_PARAMETER_DESCRIPTION = `A string containing one or more search/repla
 [new content to replace with]
 >>>>>>> REPLACE`
 
+const EXPECTED_CONTENT_HASH_DESCRIPTION = `Optional. Pass the content_hash from the last read_file result for this file ("[content_hash: sha256:...]") to avoid overwriting parallel changes. If the file was modified since you read it, the write will be blocked; re-read the file and retry.`
+
 export const apply_diff = {
 	type: "function",
 	function: {
@@ -26,6 +28,10 @@ export const apply_diff = {
 				diff: {
 					type: "string",
 					description: DIFF_PARAMETER_DESCRIPTION,
+				},
+				expected_content_hash: {
+					type: "string",
+					description: EXPECTED_CONTENT_HASH_DESCRIPTION,
 				},
 			},
 			required: ["path", "diff"],

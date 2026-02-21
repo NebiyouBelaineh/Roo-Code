@@ -9,6 +9,7 @@ export type HookErrorType =
 	| "INTENT_IGNORED"
 	| "INTENTIGNORE_PATH_BLOCKED"
 	| "HOOK_BLOCKED"
+	| "STALE_FILE"
 
 /**
  * Result of a pre-execution hook check
