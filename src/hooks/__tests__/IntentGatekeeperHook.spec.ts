@@ -31,7 +31,7 @@ describe("IntentGatekeeperHook", () => {
 			activeIntent: undefined,
 		} as Partial<Task> & { activeIntentId?: string; activeIntent?: any }
 
-		// Create mock tool use block
+		// Create mock tool use block (Phase 3: intent_id must match activeIntentId for write_to_file)
 		mockToolUse = {
 			type: "tool_use",
 			name: "write_to_file",
@@ -39,10 +39,14 @@ describe("IntentGatekeeperHook", () => {
 			params: {
 				path: "test.ts",
 				content: "test content",
+				intent_id: "INT-001",
+				mutation_class: "INTENT_EVOLUTION",
 			},
 			nativeArgs: {
 				path: "test.ts",
 				content: "test content",
+				intent_id: "INT-001",
+				mutation_class: "INTENT_EVOLUTION",
 			},
 			partial: false,
 		}
@@ -208,6 +212,39 @@ describe("IntentGatekeeperHook", () => {
 	describe("Destructive tools with valid intent", () => {
 		beforeEach(() => {
 			mockTask.activeIntentId = "INT-001"
+		})
+
+		it("should block write_to_file when intent_id in call does not match activeIntentId", async () => {
+			vi.mocked(fs.readFile).mockResolvedValue(`active_intents:
+  - id: "INT-001"
+    name: "Test Intent"
+    status: "IN_PROGRESS"
+    owned_scope: ["src/**"]`)
+			vi.mocked(yaml.parse).mockReturnValue({
+				active_intents: [
+					{ id: "INT-001", name: "Test Intent", status: "IN_PROGRESS", owned_scope: ["src/**"] },
+				],
+			})
+			mockTask.activeIntentId = "INT-001"
+			const wrongIntentToolUse = {
+				...mockToolUse,
+				nativeArgs: {
+					path: "src/foo.ts",
+					content: "x",
+					intent_id: "INT-002",
+					mutation_class: "INTENT_EVOLUTION",
+				},
+			}
+
+			const result = await hook.check({
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: wrongIntentToolUse as any,
+			})
+
+			expect(result.allow).toBe(false)
+			expect(result.error).toContain("INT-002")
+			expect(result.error).toContain("INT-001")
 		})
 
 		it("should allow write_to_file when valid intent exists", async () => {
@@ -487,6 +524,8 @@ describe("IntentGatekeeperHook", () => {
 				nativeArgs: {
 					path: "src/auth/jwt/service.ts",
 					content: "export const ok = true",
+					intent_id: "INT-001",
+					mutation_class: "INTENT_EVOLUTION",
 				},
 			}
 
@@ -524,6 +563,8 @@ describe("IntentGatekeeperHook", () => {
 				nativeArgs: {
 					path: "src/billing/invoice.ts",
 					content: "export const invoice = true",
+					intent_id: "INT-001",
+					mutation_class: "INTENT_EVOLUTION",
 				},
 			}
 
@@ -616,6 +657,8 @@ describe("IntentGatekeeperHook", () => {
 				nativeArgs: {
 					path: "src/auth/secrets/tokens.ts",
 					content: "export const token = 'x'",
+					intent_id: "INT-001",
+					mutation_class: "INTENT_EVOLUTION",
 				},
 			}
 
