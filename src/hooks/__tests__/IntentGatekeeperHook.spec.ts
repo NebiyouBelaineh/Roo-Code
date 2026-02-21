@@ -15,6 +15,11 @@ vi.mock("yaml", () => ({
 	parse: vi.fn(),
 }))
 
+const fileExistsAtPathMock = vi.fn()
+vi.mock("../../utils/fs", () => ({
+	fileExistsAtPath: (p: string) => fileExistsAtPathMock(p),
+}))
+
 describe("IntentGatekeeperHook", () => {
 	let hook: IntentGatekeeperHook
 	let mockTask: Partial<Task> & { activeIntentId?: string; activeIntent?: any }
@@ -717,6 +722,94 @@ describe("IntentGatekeeperHook", () => {
 
 			// Should be case-sensitive, so lowercase won't match uppercase
 			expect(result.allow).toBe(false)
+		})
+	})
+
+	describe("Phase 4 concurrency (stale-file check)", () => {
+		beforeEach(() => {
+			mockTask.activeIntentId = "INT-001"
+			fileExistsAtPathMock.mockReset()
+		})
+
+		it("should allow write when expected_content_hash matches current file on disk", async () => {
+			const filePath = "src/foo.ts"
+			const currentContent = "const x = 1\n"
+			const { contentHashSha256 } = await import("../../utils/contentHash")
+			const expectedHash = contentHashSha256(currentContent)
+
+			vi.mocked(fs.readFile).mockImplementation((pathArg: unknown) => {
+				const pathStr = typeof pathArg === "string" ? pathArg : String(pathArg)
+				if (pathStr.includes("active_intents.yaml")) {
+					return Promise.resolve(`active_intents:\n  - id: "INT-001"\n    owned_scope: ["src/**"]`)
+				}
+				return Promise.resolve(currentContent)
+			})
+			vi.mocked(yaml.parse).mockReturnValue({
+				active_intents: [{ id: "INT-001", owned_scope: ["src/**"] }],
+			})
+			fileExistsAtPathMock.mockResolvedValue(true)
+
+			const toolUse = {
+				...mockToolUse,
+				nativeArgs: {
+					path: filePath,
+					content: "const x = 2\n",
+					intent_id: "INT-001",
+					mutation_class: "AST_REFACTOR",
+					expected_content_hash: expectedHash,
+				},
+			}
+
+			const result = await hook.check({
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: toolUse as any,
+			})
+
+			expect(result.allow).toBe(true)
+		})
+
+		it("should block write with STALE_FILE when expected_content_hash does not match current file on disk", async () => {
+			const filePath = "src/foo.ts"
+			const oldContent = "const x = 1\n"
+			const currentContent = "const x = 99\n" // parallel edit
+			const { contentHashSha256 } = await import("../../utils/contentHash")
+			const expectedHash = contentHashSha256(oldContent)
+
+			vi.mocked(fs.readFile).mockImplementation((pathArg: unknown) => {
+				const pathStr = typeof pathArg === "string" ? pathArg : String(pathArg)
+				if (pathStr.includes("active_intents.yaml")) {
+					return Promise.resolve(`active_intents:\n  - id: "INT-001"\n    owned_scope: ["src/**"]`)
+				}
+				return Promise.resolve(currentContent)
+			})
+			vi.mocked(yaml.parse).mockReturnValue({
+				active_intents: [{ id: "INT-001", owned_scope: ["src/**"] }],
+			})
+			fileExistsAtPathMock.mockResolvedValue(true)
+
+			const toolUse = {
+				...mockToolUse,
+				nativeArgs: {
+					path: filePath,
+					content: "const x = 2\n",
+					intent_id: "INT-001",
+					mutation_class: "AST_REFACTOR",
+					expected_content_hash: expectedHash,
+				},
+			}
+
+			const result = await hook.check({
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: toolUse as any,
+			})
+
+			expect(result.allow).toBe(false)
+			expect(result.errorType).toBe("STALE_FILE")
+			expect(result.error).toContain("Stale File")
+			expect(result.error).toContain(filePath)
+			expect(result.actionHint).toBe("read_file")
 		})
 	})
 })
