@@ -1,0 +1,5 @@
+# Intent-level exclusion
+intent:INT-BLOCKED
+
+# Path-level exclusion
+docs/private/**

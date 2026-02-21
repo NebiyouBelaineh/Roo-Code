@@ -15,6 +15,12 @@ const PATH_PARAMETER_DESCRIPTION = `The path of the file to write to (relative t
 
 const CONTENT_PARAMETER_DESCRIPTION = `The content to write to the file. ALWAYS provide the COMPLETE intended content of the file, without any truncation or omissions. You MUST include ALL parts of the file, even if they haven't been modified. Do NOT include line numbers in the content.`
 
+const INTENT_ID_PARAMETER_DESCRIPTION = `The active intent ID from select_active_intent that this write belongs to. You MUST have called select_active_intent with this ID first.`
+
+const MUTATION_CLASS_PARAMETER_DESCRIPTION = `Classification of this change: AST_REFACTOR = refactoring, renaming, or moving code without changing behavior (same intent). INTENT_EVOLUTION = new behavior, new feature, or requirement change.`
+
+const EXPECTED_CONTENT_HASH_PARAMETER_DESCRIPTION = `Optional. When editing an existing file, pass the content_hash from the last read_file result for that file (the line "[content_hash: sha256:...]"). Used for optimistic locking: if the file was modified by another agent or the user since you read it, the write will be blocked so you can re-read and retry. Omit for new files.`
+
 export default {
 	type: "function",
 	function: {
@@ -32,8 +38,21 @@ export default {
 					type: "string",
 					description: CONTENT_PARAMETER_DESCRIPTION,
 				},
+				intent_id: {
+					type: "string",
+					description: INTENT_ID_PARAMETER_DESCRIPTION,
+				},
+				mutation_class: {
+					type: "string",
+					description: MUTATION_CLASS_PARAMETER_DESCRIPTION,
+					enum: ["AST_REFACTOR", "INTENT_EVOLUTION"],
+				},
+				expected_content_hash: {
+					type: "string",
+					description: EXPECTED_CONTENT_HASH_PARAMETER_DESCRIPTION,
+				},
 			},
-			required: ["path", "content"],
+			required: ["path", "content", "intent_id", "mutation_class"],
 			additionalProperties: false,
 		},
 	},

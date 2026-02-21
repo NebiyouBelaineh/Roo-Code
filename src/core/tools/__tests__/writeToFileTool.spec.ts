@@ -206,18 +206,22 @@ describe("writeToFileTool", () => {
 		mockedFileExistsAtPath.mockResolvedValue(fileExists)
 		mockCline.rooIgnoreController.validateAccess.mockReturnValue(accessAllowed)
 
-		// Create a tool use object
+		// Create a tool use object (Phase 3: intent_id and mutation_class required)
 		const toolUse: ToolUse = {
 			type: "tool_use",
 			name: "write_to_file",
 			params: {
 				path: testFilePath,
 				content: testContent,
+				intent_id: (params.intent_id ?? "INT-001") as any,
+				mutation_class: (params.mutation_class ?? "INTENT_EVOLUTION") as any,
 				...params,
 			},
 			nativeArgs: {
 				path: (params.path ?? testFilePath) as any,
 				content: (params.content ?? testContent) as any,
+				intent_id: (params.intent_id ?? "INT-001") as any,
+				mutation_class: (params.mutation_class ?? "INTENT_EVOLUTION") as any,
 			},
 			partial: isPartial,
 		}

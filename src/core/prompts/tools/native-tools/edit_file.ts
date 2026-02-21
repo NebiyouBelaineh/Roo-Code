@@ -62,6 +62,11 @@ const edit_file = {
 						"Number of replacements expected. Defaults to 1 if not specified. Use when you want to replace multiple occurrences of the same text.",
 					minimum: 1,
 				},
+				expected_content_hash: {
+					type: "string",
+					description:
+						"Optional. Pass the content_hash from the last read_file result for this file ([content_hash: sha256:...]) to avoid overwriting parallel changes. If the file was modified since you read it, the write will be blocked; re-read and retry.",
+				},
 			},
 			required: ["file_path", "old_string", "new_string"],
 			additionalProperties: false,

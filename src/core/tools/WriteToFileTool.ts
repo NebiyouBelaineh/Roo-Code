@@ -15,12 +15,16 @@ import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { convertNewFileToUnifiedDiff, computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
+import { isMutationClass } from "../../shared/tools"
+import { runAgentTracePostHook, runIntentMapPostHook, appendLessonLearned } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
 interface WriteToFileParams {
 	path: string
 	content: string
+	intent_id: string
+	mutation_class: string
 }
 
 export class WriteToFileTool extends BaseTool<"write_to_file"> {
@@ -43,6 +47,35 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 			task.consecutiveMistakeCount++
 			task.recordToolError("write_to_file")
 			pushToolResult(await task.sayAndCreateMissingParamError("write_to_file", "content"))
+			await task.diffViewProvider.reset()
+			return
+		}
+
+		const intentId = params.intent_id
+		if (!intentId || typeof intentId !== "string" || intentId.trim() === "") {
+			task.consecutiveMistakeCount++
+			task.recordToolError("write_to_file")
+			pushToolResult(await task.sayAndCreateMissingParamError("write_to_file", "intent_id"))
+			await task.diffViewProvider.reset()
+			return
+		}
+
+		const mutationClass = params.mutation_class
+		if (!mutationClass || typeof mutationClass !== "string") {
+			task.consecutiveMistakeCount++
+			task.recordToolError("write_to_file")
+			pushToolResult(await task.sayAndCreateMissingParamError("write_to_file", "mutation_class"))
+			await task.diffViewProvider.reset()
+			return
+		}
+		if (!isMutationClass(mutationClass)) {
+			task.consecutiveMistakeCount++
+			task.recordToolError("write_to_file")
+			pushToolResult(
+				formatResponse.toolError(
+					"mutation_class must be AST_REFACTOR or INTENT_EVOLUTION. AST_REFACTOR = refactor/rename/move without changing behavior; INTENT_EVOLUTION = new feature or requirement change.",
+				),
+			)
 			await task.diffViewProvider.reset()
 			return
 		}
@@ -108,6 +141,7 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 				EXPERIMENT_IDS.PREVENT_FOCUS_DISRUPTION,
 			)
 
+			let saveResult: { newProblemsMessage?: string } = {}
 			if (isPreventFocusDisruptionEnabled) {
 				task.diffViewProvider.editType = fileExists ? "modify" : "create"
 				if (fileExists) {
@@ -133,7 +167,13 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 					return
 				}
 
-				await task.diffViewProvider.saveDirectly(relPath, newContent, false, diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveDirectly(
+					relPath,
+					newContent,
+					false,
+					diagnosticsEnabled,
+					writeDelayMs,
+				)
 			} else {
 				if (!task.diffViewProvider.isEditing) {
 					const partialMessage = JSON.stringify(sharedMessageProps)
@@ -166,7 +206,7 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 					return
 				}
 
-				await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
 			}
 
 			if (relPath) {
@@ -178,6 +218,35 @@ export class WriteToFileTool extends BaseTool<"write_to_file"> {
 			const message = await task.diffViewProvider.pushToolWriteResult(task, task.cwd, !fileExists)
 
 			pushToolResult(message)
+
+			// Phase 3: append Agent Trace entry after successful write (post-hook).
+			try {
+				await runAgentTracePostHook(task, {
+					path: relPath,
+					content: newContent,
+					intent_id: intentId,
+				})
+			} catch (err) {
+				console.error("[WriteToFileTool] Agent trace post-hook failed:", err)
+			}
+
+			// Update intent_map.md when INTENT_EVOLUTION (Phase 3 spatial map).
+			if (mutationClass === "INTENT_EVOLUTION") {
+				try {
+					await runIntentMapPostHook(task, { intent_id: intentId, path: relPath })
+				} catch (err) {
+					console.error("[WriteToFileTool] Intent map post-hook failed:", err)
+				}
+			}
+
+			// Phase 4: record lesson when linter reports new problems after save.
+			if (saveResult.newProblemsMessage?.trim()) {
+				try {
+					await appendLessonLearned(task.cwd, relPath, saveResult.newProblemsMessage)
+				} catch (err) {
+					console.error("[WriteToFileTool] Lesson recording failed:", err)
+				}
+			}
 
 			await task.diffViewProvider.reset()
 			this.resetPartialState()

@@ -13,6 +13,7 @@ import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
+import { runAgentTracePostHook, appendLessonLearned } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -144,6 +145,7 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				diff: diffContent,
 			}
 
+			let saveResult: { newProblemsMessage?: string } = {}
 			if (isPreventFocusDisruptionEnabled) {
 				// Direct file write without diff view
 				const completeMessage = JSON.stringify({
@@ -175,7 +177,7 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				// Save directly without showing diff view or opening the file
 				task.diffViewProvider.editType = "modify"
 				task.diffViewProvider.originalContent = originalContent
-				await task.diffViewProvider.saveDirectly(
+				saveResult = await task.diffViewProvider.saveDirectly(
 					relPath,
 					diffResult.content,
 					false,
@@ -219,7 +221,7 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				}
 
 				// Call saveChanges to update the DiffViewProvider properties
-				await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
 			}
 
 			// Track file edit operation
@@ -249,6 +251,25 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				pushToolResult(partFailHint + message + singleBlockNotice)
 			} else {
 				pushToolResult(message + singleBlockNotice)
+			}
+
+			// Phase 3: append Agent Trace entry after successful apply_diff (same ledger as write_to_file).
+			const activeIntentId = (task as { activeIntentId?: string }).activeIntentId
+			if (activeIntentId) {
+				try {
+					await runAgentTracePostHook(task, { path: relPath, intent_id: activeIntentId })
+				} catch (err) {
+					console.error("[ApplyDiffTool] Agent trace post-hook failed:", err)
+				}
+			}
+
+			// Phase 4: record lesson when linter reports new problems after save.
+			if (saveResult.newProblemsMessage?.trim()) {
+				try {
+					await appendLessonLearned(task.cwd, relPath, saveResult.newProblemsMessage)
+				} catch (err) {
+					console.error("[ApplyDiffTool] Lesson recording failed:", err)
+				}
 			}
 
 			await task.diffViewProvider.reset()

@@ -13,6 +13,7 @@ import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { sanitizeUnifiedDiff, computeDiffStats } from "../diff/stats"
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 import type { ToolUse } from "../../shared/tools"
+import { appendLessonLearned } from "../../hooks"
 import { parsePatch, ParseError, processAllHunks } from "./apply-patch"
 import type { ApplyPatchFileChange } from "./apply-patch"
 
@@ -214,15 +215,31 @@ export class ApplyPatchTool extends BaseTool<"apply_patch"> {
 		}
 
 		// Save the changes
+		let saveResult: { newProblemsMessage?: string } = {}
 		if (isPreventFocusDisruptionEnabled) {
-			await task.diffViewProvider.saveDirectly(relPath, newContent, true, diagnosticsEnabled, writeDelayMs)
+			saveResult = await task.diffViewProvider.saveDirectly(
+				relPath,
+				newContent,
+				true,
+				diagnosticsEnabled,
+				writeDelayMs,
+			)
 		} else {
-			await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
+			saveResult = await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
 		}
 
 		// Track file edit operation
 		await task.fileContextTracker.trackFileContext(relPath, "roo_edited" as RecordSource)
 		task.didEditFile = true
+
+		// Phase 4: record lesson when linter reports new problems after save.
+		if (saveResult.newProblemsMessage?.trim()) {
+			try {
+				await appendLessonLearned(task.cwd, relPath, saveResult.newProblemsMessage)
+			} catch (err) {
+				console.error("[ApplyPatchTool] Lesson recording failed:", err)
+			}
+		}
 
 		const message = await task.diffViewProvider.pushToolWriteResult(task, task.cwd, true)
 		pushToolResult(message)
@@ -432,13 +449,29 @@ export class ApplyPatchTool extends BaseTool<"apply_patch"> {
 			await task.fileContextTracker.trackFileContext(change.movePath, "roo_edited" as RecordSource)
 		} else {
 			// Save changes to the same file
+			let saveResult: { newProblemsMessage?: string } = {}
 			if (isPreventFocusDisruptionEnabled) {
-				await task.diffViewProvider.saveDirectly(relPath, newContent, false, diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveDirectly(
+					relPath,
+					newContent,
+					false,
+					diagnosticsEnabled,
+					writeDelayMs,
+				)
 			} else {
-				await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
+				saveResult = await task.diffViewProvider.saveChanges(diagnosticsEnabled, writeDelayMs)
 			}
 
 			await task.fileContextTracker.trackFileContext(relPath, "roo_edited" as RecordSource)
+
+			// Phase 4: record lesson when linter reports new problems after save.
+			if (saveResult.newProblemsMessage?.trim()) {
+				try {
+					await appendLessonLearned(task.cwd, relPath, saveResult.newProblemsMessage)
+				} catch (err) {
+					console.error("[ApplyPatchTool] Lesson recording failed:", err)
+				}
+			}
 		}
 
 		task.didEditFile = true
