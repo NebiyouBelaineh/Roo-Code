@@ -52,6 +52,7 @@ export const toolParamNames = [
 	"size",
 	"query",
 	"args",
+	"intent_id", // select_active_intent parameter
 	"skill", // skill tool parameter
 	"start_line",
 	"end_line",
@@ -323,6 +324,7 @@ export const ALWAYS_AVAILABLE_TOOLS: ToolName[] = [
 	"update_todo_list",
 	"run_slash_command",
 	"skill",
+	"select_active_intent", // Required for intent-driven protocol; callable from any mode when orchestration is active
 ] as const
 
 /**

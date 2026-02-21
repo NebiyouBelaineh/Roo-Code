@@ -697,7 +697,14 @@ export async function presentAssistantMessage(cline: Task) {
 					cline.recordToolError(block.name)
 					cline.didToolFailInCurrentTurn = true
 					const errorMessage = hookResult.error || "You must cite a valid active Intent ID."
-					pushToolResult(IntentGatekeeperHook.formatError(errorMessage))
+					pushToolResult(
+						IntentGatekeeperHook.formatError(errorMessage, {
+							errorType: hookResult.errorType,
+							recoverable: hookResult.recoverable,
+							actionHint: hookResult.actionHint,
+							classification: hookResult.classification,
+						}),
+					)
 					break
 				}
 			}

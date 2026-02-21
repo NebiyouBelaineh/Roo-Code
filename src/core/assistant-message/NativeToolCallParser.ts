@@ -984,6 +984,12 @@ export class NativeToolCallParser {
 					}
 					break
 
+				case "select_active_intent":
+					if (args.intent_id !== undefined) {
+						nativeArgs = { intent_id: args.intent_id } as NativeArgsFor<TName>
+					}
+					break
+
 				default:
 					if (customToolRegistry.has(resolvedName)) {
 						nativeArgs = args as NativeArgsFor<TName>

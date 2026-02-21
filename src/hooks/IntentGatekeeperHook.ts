@@ -1,11 +1,11 @@
 import * as fs from "fs/promises"
 import * as path from "path"
+import * as vscode from "vscode"
 import * as yaml from "yaml"
 
 import type { ToolName } from "@roo-code/types"
-import { formatResponse } from "../core/prompts/responses"
 import type { ToolUse } from "../shared/tools"
-import type { HookContext, HookResult } from "./types"
+import type { HookContext, HookErrorType, HookResult, ToolClassification } from "./types"
 
 /**
  * Tools that require an active intent to be selected before execution.
@@ -44,6 +44,20 @@ const EXEMPT_TOOLS: Set<ToolName> = new Set([
 	"generate_image",
 ])
 
+interface ActiveIntent {
+	id: string
+	owned_scope?: string[]
+}
+
+interface ActiveIntentsData {
+	active_intents?: ActiveIntent[]
+}
+
+interface IntentIgnorePolicy {
+	ignoredIntents: Set<string>
+	ignoredPathPatterns: string[]
+}
+
 /**
  * Intent Gatekeeper Hook
  *
@@ -52,6 +66,8 @@ const EXEMPT_TOOLS: Set<ToolName> = new Set([
  * is selected.
  */
 export class IntentGatekeeperHook {
+	private static readonly INTENT_REQUIRED_ERROR = "You must cite a valid active Intent ID."
+
 	/**
 	 * Check if a tool execution should be allowed based on intent requirements.
 	 *
@@ -59,65 +75,303 @@ export class IntentGatekeeperHook {
 	 * @returns HookResult indicating whether execution should proceed
 	 */
 	async check(context: HookContext): Promise<HookResult> {
-		const { task, toolName } = context
+		const { task, toolName, toolUse } = context
+		const classification = this.classifyTool(toolName)
 
-		// Exempt tools don't require intent
-		if (EXEMPT_TOOLS.has(toolName)) {
-			return { allow: true }
+		if (classification === "safe") {
+			return { allow: true, classification }
 		}
 
-		// Only enforce intent requirement for destructive tools
-		if (!TOOLS_REQUIRING_INTENT.has(toolName)) {
-			return { allow: true }
-		}
-
-		// Check if an active intent has been selected
 		const activeIntentId = (task as any).activeIntentId as string | undefined
-
 		if (!activeIntentId) {
-			return {
-				allow: false,
-				error: "You must cite a valid active Intent ID.",
+			const proceed = await this.requestHitlForDestructiveDenial(
+				context,
+				IntentGatekeeperHook.INTENT_REQUIRED_ERROR,
+				classification,
+			)
+			if (proceed) return { allow: true, classification }
+			return this.denied(
+				IntentGatekeeperHook.INTENT_REQUIRED_ERROR,
+				classification,
+				"MISSING_OR_INVALID_INTENT",
+				"select_active_intent",
+			)
+		}
+
+		const intentsData = await this.loadIntents(task.cwd)
+		const activeIntents = intentsData?.active_intents || []
+		const activeIntent = activeIntents.find((intent) => intent.id === activeIntentId)
+		if (!activeIntent) {
+			const proceed = await this.requestHitlForDestructiveDenial(
+				context,
+				IntentGatekeeperHook.INTENT_REQUIRED_ERROR,
+				classification,
+			)
+			if (proceed) return { allow: true, classification }
+			return this.denied(
+				IntentGatekeeperHook.INTENT_REQUIRED_ERROR,
+				classification,
+				"MISSING_OR_INVALID_INTENT",
+				"select_active_intent",
+			)
+		}
+
+		const intentIgnorePolicy = await this.readIntentIgnorePolicy(task.cwd)
+		if (intentIgnorePolicy.ignoredIntents.has(activeIntentId)) {
+			const proceed = await this.requestHitlForDestructiveDenial(
+				context,
+				`Intent ${activeIntentId} is excluded by .intentignore.`,
+				classification,
+			)
+			if (proceed) return { allow: true, classification }
+			return this.denied(
+				`Intent ${activeIntentId} is excluded by .intentignore.`,
+				classification,
+				"INTENT_IGNORED",
+				"select_active_intent",
+			)
+		}
+
+		// Enforce .intentignore path exclusions and owned_scope for all path-based destructive tools.
+		const targetPaths = this.getTargetPathsForTool(toolName, toolUse)
+		if (targetPaths.length > 0) {
+			const scopePatterns = activeIntent.owned_scope || []
+			for (const targetPath of targetPaths) {
+				if (this.matchesAnyPattern(targetPath, intentIgnorePolicy.ignoredPathPatterns)) {
+					const proceed = await this.requestHitlForDestructiveDenial(
+						context,
+						`Path ${targetPath} is blocked by .intentignore.`,
+						classification,
+					)
+					if (proceed) return { allow: true, classification }
+					return this.denied(
+						`Path ${targetPath} is blocked by .intentignore.`,
+						classification,
+						"INTENTIGNORE_PATH_BLOCKED",
+						"update_intentignore_or_choose_different_file",
+					)
+				}
+				if (scopePatterns.length > 0 && !this.matchesAnyPattern(targetPath, scopePatterns)) {
+					const proceed = await this.requestHitlForDestructiveDenial(
+						context,
+						`Scope Violation: ${activeIntentId} is not authorized to edit [${targetPath}]. Request scope expansion.`,
+						classification,
+					)
+					if (proceed) return { allow: true, classification }
+					return this.denied(
+						`Scope Violation: ${activeIntentId} is not authorized to edit [${targetPath}]. Request scope expansion.`,
+						classification,
+						"SCOPE_VIOLATION",
+						"request_scope_expansion",
+					)
+				}
 			}
 		}
 
-		// Validate that the intent exists in active_intents.yaml
-		const isValid = await this.validateIntentExists(activeIntentId, task.cwd)
-
-		if (!isValid) {
-			return {
-				allow: false,
-				error: "You must cite a valid active Intent ID.",
-			}
-		}
-
-		return { allow: true }
+		return { allow: true, classification }
 	}
 
 	/**
-	 * Validates that an intent ID exists in active_intents.yaml
+	 * Loads active intents file.
 	 */
-	private async validateIntentExists(intentId: string, cwd: string): Promise<boolean> {
+	private async loadIntents(cwd: string): Promise<ActiveIntentsData | undefined> {
 		try {
 			const orchestrationDir = path.join(cwd, ".orchestration")
 			const intentsFilePath = path.join(orchestrationDir, "active_intents.yaml")
 
 			const fileContent = await fs.readFile(intentsFilePath, "utf-8")
-			const intentsData = yaml.parse(fileContent) as { active_intents?: Array<{ id: string }> }
-
-			const activeIntents = intentsData?.active_intents || []
-			return activeIntents.some((intent) => intent.id === intentId)
+			return yaml.parse(fileContent) as ActiveIntentsData
 		} catch (error) {
-			// If file doesn't exist or can't be read, consider intent invalid
-			console.error(`Failed to validate intent ${intentId}:`, error)
-			return false
+			// If file doesn't exist or can't be read, consider all intents invalid
+			console.error(`Failed to load active intents:`, error)
+			return undefined
 		}
 	}
 
 	/**
 	 * Format error response for blocked execution
 	 */
-	static formatError(error: string): string {
-		return formatResponse.toolError(error)
+	static formatError(
+		error: string,
+		metadata?: {
+			errorType?: HookErrorType
+			recoverable?: boolean
+			actionHint?: string
+			classification?: ToolClassification
+		},
+	): string {
+		return JSON.stringify({
+			status: "error",
+			message: "The tool execution failed",
+			error,
+			error_type: metadata?.errorType ?? "MISSING_OR_INVALID_INTENT",
+			recoverable: metadata?.recoverable ?? true,
+			action_hint: metadata?.actionHint ?? "select_active_intent",
+			classification: metadata?.classification,
+		})
+	}
+
+	private classifyTool(toolName: ToolName): ToolClassification {
+		if (EXEMPT_TOOLS.has(toolName)) {
+			return "safe"
+		}
+		if (TOOLS_REQUIRING_INTENT.has(toolName)) {
+			return "destructive"
+		}
+		return "safe"
+	}
+
+	private denied(
+		error: string,
+		classification: ToolClassification,
+		errorType: HookErrorType,
+		actionHint: string,
+	): HookResult {
+		return {
+			allow: false,
+			error,
+			classification,
+			errorType,
+			recoverable: true,
+			actionHint,
+		}
+	}
+
+	/**
+	 * UI-Blocking Authorization per TRP1 Phase 2.2: when a destructive action would be
+	 * denied (intent missing, scope violation, etc.), show Approve/Reject so the user can
+	 * assert boundaries and optionally proceed knowing the situation. Runs even when
+	 * "auto write approved" is on.
+	 */
+	private async requestHitlForDestructiveDenial(
+		context: HookContext,
+		errorMessage: string,
+		classification: ToolClassification,
+	): Promise<boolean> {
+		const message = `${errorMessage} This action may be destructive. Proceed anyway?`
+		if (context.askForAuthorization) {
+			return context.askForAuthorization(message)
+		}
+		const choice = await vscode.window.showWarningMessage(message, { modal: true }, "Approve", "Reject")
+		return choice === "Approve"
+	}
+
+	private static readonly PATCH_FILE_MARKERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: "] as const
+
+	/**
+	 * Returns all target file paths for a destructive tool (for scope and .intentignore checks).
+	 * Returns empty array for tools with no path (e.g. execute_command) or when path cannot be determined.
+	 */
+	private getTargetPathsForTool(toolName: ToolName, toolUse: ToolUse<ToolName>): string[] {
+		const nativeArgs = toolUse.nativeArgs as Record<string, unknown> | undefined
+		const params = toolUse.params as Record<string, unknown> | undefined
+		const getPath = (key: string): string | undefined => {
+			const value = nativeArgs?.[key] ?? params?.[key]
+			if (typeof value !== "string" || value.trim().length === 0) return undefined
+			return this.normalizePath(value)
+		}
+
+		switch (toolName) {
+			case "write_to_file":
+			case "apply_diff": {
+				const p = getPath("path")
+				return p ? [p] : []
+			}
+			case "edit":
+			case "edit_file":
+			case "search_replace": {
+				const p = getPath("file_path")
+				return p ? [p] : []
+			}
+			case "apply_patch": {
+				const patch = nativeArgs?.patch ?? params?.patch
+				if (typeof patch !== "string") return []
+				return this.extractPathsFromPatch(patch)
+			}
+			default:
+				return []
+		}
+	}
+
+	private extractPathsFromPatch(patchContent: string): string[] {
+		const paths: string[] = []
+		for (const line of patchContent.split(/\r?\n/)) {
+			for (const marker of IntentGatekeeperHook.PATCH_FILE_MARKERS) {
+				if (line.startsWith(marker)) {
+					const filePath = line.slice(marker.length).trim()
+					if (filePath) {
+						paths.push(this.normalizePath(filePath))
+					}
+					break
+				}
+			}
+		}
+		return paths
+	}
+
+	private normalizePath(filePath: string): string {
+		return filePath.replace(/\\/g, "/").replace(/^\.\//, "")
+	}
+
+	/**
+	 * Reads .intentignore from both .orchestration/.intentignore and workspace root .intentignore,
+	 * merging exclusions so that either location works (e.g. Phase 2 Script C with .orchestration/.intentignore).
+	 */
+	private async readIntentIgnorePolicy(cwd: string): Promise<IntentIgnorePolicy> {
+		const policy: IntentIgnorePolicy = {
+			ignoredIntents: new Set<string>(),
+			ignoredPathPatterns: [],
+		}
+
+		const locations = [path.join(cwd, ".orchestration", ".intentignore"), path.join(cwd, ".intentignore")]
+		for (const intentIgnorePath of locations) {
+			try {
+				const content = await fs.readFile(intentIgnorePath, "utf-8")
+				this.parseIntentIgnoreContent(content, policy)
+			} catch {
+				// Missing file at this location is valid; try next or leave policy as-is.
+			}
+		}
+
+		return policy
+	}
+
+	private parseIntentIgnoreContent(content: string, policy: IntentIgnorePolicy): void {
+		for (const rawLine of content.split(/\r?\n/)) {
+			const line = rawLine.trim()
+			if (!line || line.startsWith("#")) {
+				continue
+			}
+			if (line.startsWith("intent:")) {
+				const intentId = line.slice("intent:".length).trim()
+				if (intentId) {
+					policy.ignoredIntents.add(intentId)
+				}
+				continue
+			}
+			policy.ignoredPathPatterns.push(this.normalizePath(line))
+		}
+	}
+
+	private matchesAnyPattern(targetPath: string, patterns: string[]): boolean {
+		return patterns.some((pattern) => this.matchesPattern(targetPath, pattern))
+	}
+
+	private matchesPattern(targetPath: string, pattern: string): boolean {
+		const normalizedTarget = this.normalizePath(targetPath)
+		const normalizedPattern = this.normalizePath(pattern)
+
+		if (!normalizedPattern.includes("*")) {
+			return normalizedTarget === normalizedPattern
+		}
+
+		const escaped = normalizedPattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+		const doubleStarToken = "__DOUBLE_STAR__"
+		const regexPattern = escaped
+			.replace(/\*\*/g, doubleStarToken)
+			.replace(/\*/g, "[^/]*")
+			.replace(new RegExp(doubleStarToken, "g"), ".*")
+		const regex = new RegExp(`^${regexPattern}$`)
+		return regex.test(normalizedTarget)
 	}
 }

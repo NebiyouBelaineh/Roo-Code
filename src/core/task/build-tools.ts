@@ -9,11 +9,13 @@ import type { ClineProvider } from "../webview/ClineProvider"
 import { getRooDirectoriesForCwd } from "../../services/roo-config/index.js"
 
 import { getNativeTools, getMcpServerTools } from "../prompts/tools/native-tools"
+import selectActiveIntent from "../prompts/tools/native-tools/select_active_intent"
 import {
 	filterNativeToolsForMode,
 	filterMcpToolsForMode,
 	resolveToolAlias,
 } from "../prompts/tools/filter-tools-for-mode"
+import { hasOrchestrationIntents } from "../prompts/sections/intent-handshake"
 
 interface BuildToolsOptions {
 	provider: ClineProvider
@@ -114,7 +116,7 @@ export async function buildNativeToolsArrayWithRestrictions(options: BuildToolsO
 	})
 
 	// Filter native tools based on mode restrictions.
-	const filteredNativeTools = filterNativeToolsForMode(
+	let filteredNativeTools = filterNativeToolsForMode(
 		nativeTools,
 		mode,
 		customModes,
@@ -123,6 +125,13 @@ export async function buildNativeToolsArrayWithRestrictions(options: BuildToolsO
 		filterSettings,
 		mcpHub,
 	)
+
+	// When orchestration is active, ensure select_active_intent is available so the model can follow the Intent-Driven Protocol.
+	const orchestrationActive = await hasOrchestrationIntents(cwd)
+	const hasSelectIntent = filteredNativeTools.some((t) => getToolName(t) === "select_active_intent")
+	if (orchestrationActive && !hasSelectIntent) {
+		filteredNativeTools = [...filteredNativeTools, selectActiveIntent]
+	}
 
 	// Filter MCP tools based on mode restrictions.
 	const mcpTools = getMcpServerTools(mcpHub)
