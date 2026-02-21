@@ -104,6 +104,21 @@ describe("IntentGatekeeperHook", () => {
 			expect(result.allow).toBe(false)
 			expect(result.error).toBe("You must cite a valid active Intent ID.")
 		})
+
+		it("should allow when askForAuthorization returns true (HITL Approve)", async () => {
+			mockTask.activeIntentId = undefined
+			const context: HookContext = {
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: mockToolUse as any,
+				askForAuthorization: vi.fn().mockResolvedValue(true),
+			}
+			const result = await hook.check(context)
+			expect(result.allow).toBe(true)
+			expect(context.askForAuthorization).toHaveBeenCalledWith(
+				expect.stringContaining("You must cite a valid active Intent ID."),
+			)
+		})
 	})
 
 	describe("Destructive tools with invalid intent", () => {
@@ -440,6 +455,179 @@ describe("IntentGatekeeperHook", () => {
 
 			expect(formatted).toBeDefined()
 			expect(typeof formatted).toBe("string")
+		})
+	})
+
+	describe("Phase 2 middleware behaviors", () => {
+		beforeEach(() => {
+			mockTask.activeIntentId = "INT-001"
+		})
+
+		it("should allow write_to_file when path is inside active intent owned_scope", async () => {
+			vi.mocked(fs.readFile).mockResolvedValue(`active_intents:
+  - id: "INT-001"
+    name: "Auth Refactor"
+    status: "IN_PROGRESS"
+    owned_scope:
+      - "src/auth/**"
+      - "src/middleware/jwt.ts"`)
+			vi.mocked(yaml.parse).mockReturnValue({
+				active_intents: [
+					{
+						id: "INT-001",
+						name: "Auth Refactor",
+						status: "IN_PROGRESS",
+						owned_scope: ["src/auth/**", "src/middleware/jwt.ts"],
+					},
+				],
+			})
+
+			const inScopeToolUse = {
+				...mockToolUse,
+				nativeArgs: {
+					path: "src/auth/jwt/service.ts",
+					content: "export const ok = true",
+				},
+			}
+
+			const result = await hook.check({
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: inScopeToolUse as any,
+			})
+
+			expect(result.allow).toBe(true)
+			expect(result.classification).toBe("destructive")
+		})
+
+		it("should block write_to_file when path is outside active intent owned_scope", async () => {
+			vi.mocked(fs.readFile).mockResolvedValue(`active_intents:
+  - id: "INT-001"
+    name: "Auth Refactor"
+    status: "IN_PROGRESS"
+    owned_scope:
+      - "src/auth/**"
+      - "src/middleware/jwt.ts"`)
+			vi.mocked(yaml.parse).mockReturnValue({
+				active_intents: [
+					{
+						id: "INT-001",
+						name: "Auth Refactor",
+						status: "IN_PROGRESS",
+						owned_scope: ["src/auth/**", "src/middleware/jwt.ts"],
+					},
+				],
+			})
+
+			const outOfScopeToolUse = {
+				...mockToolUse,
+				nativeArgs: {
+					path: "src/billing/invoice.ts",
+					content: "export const invoice = true",
+				},
+			}
+
+			const context: HookContext = {
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: outOfScopeToolUse as any,
+			}
+
+			const result = await hook.check(context)
+
+			expect(result.allow).toBe(false)
+			expect(result.error).toContain("Scope Violation")
+			expect(result.error).toContain("INT-001")
+			expect(result.error).toContain("src/billing/invoice.ts")
+		})
+
+		it("should provide structured recoverable error metadata for blocked operations", () => {
+			const formatted = IntentGatekeeperHook.formatError("You must cite a valid active Intent ID.")
+			const payload = JSON.parse(formatted) as Record<string, unknown>
+
+			// Phase 2 requires standardized machine-readable recovery payloads.
+			expect(payload.status).toBe("error")
+			expect(payload.recoverable).toBe(true)
+			expect(payload.error_type).toBe("MISSING_OR_INVALID_INTENT")
+			expect(payload.action_hint).toBe("select_active_intent")
+		})
+
+		it("should block execution when active intent is excluded by .intentignore", async () => {
+			vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+				if (String(filePath).endsWith("/.orchestration/active_intents.yaml")) {
+					return `active_intents:
+  - id: "INT-001"
+    name: "Auth Refactor"
+    status: "IN_PROGRESS"
+    owned_scope:
+      - "src/auth/**"`
+				}
+				if (String(filePath).endsWith("/.intentignore")) {
+					return "intent:INT-001"
+				}
+				throw new Error(`Unexpected path ${String(filePath)}`)
+			})
+			vi.mocked(yaml.parse).mockReturnValue({
+				active_intents: [
+					{ id: "INT-001", name: "Auth Refactor", status: "IN_PROGRESS", owned_scope: ["src/auth/**"] },
+				],
+			})
+
+			const result = await hook.check({
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: mockToolUse as any,
+			})
+
+			expect(result.allow).toBe(false)
+			expect(result.errorType).toBe("INTENT_IGNORED")
+			expect(result.actionHint).toBe("select_active_intent")
+		})
+
+		it("should block write_to_file when target path is blocked by .intentignore pattern", async () => {
+			vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+				if (String(filePath).endsWith("/.orchestration/active_intents.yaml")) {
+					return `active_intents:
+  - id: "INT-001"
+    name: "Auth Refactor"
+    status: "IN_PROGRESS"
+    owned_scope:
+      - "src/auth/**"
+      - "src/middleware/**"`
+				}
+				if (String(filePath).endsWith("/.intentignore")) {
+					return "src/auth/secrets/**"
+				}
+				throw new Error(`Unexpected path ${String(filePath)}`)
+			})
+			vi.mocked(yaml.parse).mockReturnValue({
+				active_intents: [
+					{
+						id: "INT-001",
+						name: "Auth Refactor",
+						status: "IN_PROGRESS",
+						owned_scope: ["src/auth/**", "src/middleware/**"],
+					},
+				],
+			})
+
+			const blockedPathToolUse = {
+				...mockToolUse,
+				nativeArgs: {
+					path: "src/auth/secrets/tokens.ts",
+					content: "export const token = 'x'",
+				},
+			}
+
+			const result = await hook.check({
+				task: mockTask as Task,
+				toolName: "write_to_file",
+				toolUse: blockedPathToolUse as any,
+			})
+
+			expect(result.allow).toBe(false)
+			expect(result.errorType).toBe("INTENTIGNORE_PATH_BLOCKED")
+			expect(result.error).toContain(".intentignore")
 		})
 	})
 
