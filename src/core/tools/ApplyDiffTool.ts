@@ -13,6 +13,7 @@ import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
+import { runAgentTracePostHook } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -249,6 +250,16 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				pushToolResult(partFailHint + message + singleBlockNotice)
 			} else {
 				pushToolResult(message + singleBlockNotice)
+			}
+
+			// Phase 3: append Agent Trace entry after successful apply_diff (same ledger as write_to_file).
+			const activeIntentId = (task as { activeIntentId?: string }).activeIntentId
+			if (activeIntentId) {
+				try {
+					await runAgentTracePostHook(task, { path: relPath, intent_id: activeIntentId })
+				} catch (err) {
+					console.error("[ApplyDiffTool] Agent trace post-hook failed:", err)
+				}
 			}
 
 			await task.diffViewProvider.reset()

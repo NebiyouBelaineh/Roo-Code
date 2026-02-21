@@ -12,6 +12,7 @@ import { fileExistsAtPath } from "../../utils/fs"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { sanitizeUnifiedDiff, computeDiffStats } from "../diff/stats"
 import type { ToolUse } from "../../shared/tools"
+import { runAgentTracePostHook } from "../../hooks"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -462,6 +463,16 @@ export class EditFileTool extends BaseTool<"edit_file"> {
 			const message = await task.diffViewProvider.pushToolWriteResult(task, task.cwd, isNewFile)
 
 			pushToolResult(message + replacementInfo)
+
+			// Phase 3: append Agent Trace entry after successful edit_file (same ledger as write_to_file).
+			const activeIntentId = (task as { activeIntentId?: string }).activeIntentId
+			if (activeIntentId) {
+				try {
+					await runAgentTracePostHook(task, { path: relPath, intent_id: activeIntentId })
+				} catch (err) {
+					console.error("[EditFileTool] Agent trace post-hook failed:", err)
+				}
+			}
 
 			// Record successful tool usage and cleanup
 			task.recordToolUsage("edit_file")
